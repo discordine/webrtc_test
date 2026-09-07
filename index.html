@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WebRTC Camera P2P</title>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:1000px;margin:auto;padding:20px;line-height:1.5}
+    h1{font-size:1.5rem} h2{font-size:1.1rem}
+    .box{border:1px solid #ccc;border-radius:10px;padding:16px;margin:14px 0}
+    button{padding:9px 13px;margin:3px;cursor:pointer}
+    textarea{width:100%;min-height:150px;box-sizing:border-box;font-family:monospace}
+    video{width:100%;max-height:60vh;background:#111;border-radius:10px}
+    #status{padding:10px;border-radius:8px;background:#eee}
+    #stats{white-space:pre-wrap;font-family:monospace;background:#f5f5f5;padding:10px;border-radius:8px}
+    .small{color:#666;font-size:.9rem}
+  </style>
+</head>
+<body>
+  <h1>WebRTC カメラ P2P</h1>
+  <div id="status">未開始</div>
+
+  <div class="box">
+    <h2>1. 役割</h2>
+    <button id="sender">PC側（送信）</button>
+    <button id="receiver">スマホ側（受信）</button>
+  </div>
+
+  <div class="box">
+    <h2>2. 映像</h2>
+    <video id="video" autoplay playsinline muted></video>
+    <button id="camera">カメラ開始</button>
+  </div>
+
+  <div class="box">
+    <h2>3. シグナリング</h2>
+    <p class="small">Offer / Answerは手動でコピーします。映像そのものはこのページを経由しません。</p>
+
+    <label>自分が生成した情報</label>
+    <textarea id="local" readonly></textarea>
+    <button id="copy">コピー</button>
+
+    <label>相手から受け取った情報</label>
+    <textarea id="remote" placeholder="OfferまたはAnswerを貼り付け"></textarea>
+    <button id="apply">適用</button>
+  </div>
+
+  <div class="box">
+    <h2>4. 接続診断</h2>
+    <div id="stats">まだ接続されていません。</div>
+    <p class="small">
+      host = ローカル候補 / srflx = STUNで発見したNAT外側の候補 /
+      relay = TURN中継。srflx同士などでconnectedになれば、TURNを使わないP2P接続の可能性が高いです。
+    </p>
+  </div>
+
+  <div class="box">
+    <h2>手順</h2>
+    <ol>
+      <li>PCで「PC側（送信）」→「カメラ開始」。</li>
+      <li>PCのOfferをスマホへコピー。</li>
+      <li>スマホで「スマホ側（受信）」→ Offerを貼り付けて「適用」。</li>
+      <li>スマホに表示されたAnswerをPCへコピー。</li>
+      <li>PCにAnswerを貼り付けて「適用」。</li>
+      <li>接続後、「接続診断」でcandidate typeを確認。</li>
+    </ol>
+  </div>
+
+<script>
+"use strict";
+
+// Googleの公開STUNサーバー。
+// STUNはNAT越しの外側アドレス候補を発見するために使用する。
+// STUN自体は映像を中継しない。
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" }
+];
+
+let role = null;
+let pc = null;
+let stream = null;
+let candidates = [];
+
+const $ = id => document.getElementById(id);
+const video = $("video");
+
+function status(text) {
+  $("status").textContent = text;
+}
+
+function createPeer() {
+  if (pc) pc.close();
+  candidates = [];
+
+  // ブラウザ標準のRTCPeerConnectionを生成する。
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  pc.onicecandidate = e => {
+    if (e.candidate) {
+      candidates.push(e.candidate.toJSON());
+    }
+  };
+
+  pc.onicegatheringstatechange = () => {
+    status(`ICE gathering: ${pc.iceGatheringState}`);
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    status(`ICE connection: ${pc.iceConnectionState}`);
+    updateStats();
+  };
+
+  pc.onconnectionstatechange = () => {
+    status(`接続状態: ${pc.connectionState}`);
+    updateStats();
+  };
+
+  pc.ontrack = e => {
+    // 受信側では相手のMediaStreamをvideoへ渡す。
+    if (e.streams[0]) {
+      video.srcObject = e.streams[0];
+      video.play().catch(() => {});
+    }
+  };
+
+  return pc;
+}
+
+async function waitIceComplete() {
+  if (pc.iceGatheringState === "complete") return;
+
+  await new Promise(resolve => {
+    const timer = setTimeout(resolve, 8000);
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+  });
+}
+
+function makeSignal() {
+  return JSON.stringify({
+    type: pc.localDescription.type,
+    sdp: pc.localDescription.sdp,
+    candidates
+  });
+}
+
+async function startSender() {
+  role = "sender";
+  createPeer();
+
+  try {
+    // getUserMediaもブラウザ標準API。
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false
+    });
+
+    video.srcObject = stream;
+
+    for (const track of stream.getTracks()) {
+      pc.addTrack(track, stream);
+    }
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceComplete();
+
+    $("local").value = makeSignal();
+    status("Offer生成完了。スマホへコピーしてください。");
+  } catch (e) {
+    status(`カメラ/Offer生成エラー: ${e.message}`);
+    console.error(e);
+  }
+}
+
+function startReceiver() {
+  role = "receiver";
+  createPeer();
+  status("受信側です。PCのOfferを貼り付けてください。");
+}
+
+async function applyRemote() {
+  if (!pc) {
+    status("先に役割を選択してください。");
+    return;
+  }
+
+  let data;
+  try {
+    data = JSON.parse($("remote").value);
+  } catch {
+    status("JSONを読み込めません。Offer/Answer全体を貼り付けてください。");
+    return;
+  }
+
+  try {
+    await pc.setRemoteDescription({
+      type: data.type,
+      sdp: data.sdp
+    });
+
+    // 手動signalingなので、Offer/Answerと一緒にまとめたICE candidateも追加する。
+    for (const candidate of (data.candidates || [])) {
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn("ICE candidate追加失敗:", e);
+      }
+    }
+
+    if (data.type === "offer" && role === "receiver") {
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitIceComplete();
+
+      $("local").value = makeSignal();
+      status("Answer生成完了。PCへコピーしてください。");
+    } else if (data.type === "answer" && role === "sender") {
+      status("Answer適用完了。P2P接続を確立中...");
+    } else {
+      status("現在の役割とOffer/Answerの組み合わせが不正です。");
+    }
+  } catch (e) {
+    status(`適用エラー: ${e.message}`);
+    console.error(e);
+  }
+}
+
+async function updateStats() {
+  if (!pc) return;
+
+  try {
+    const report = await pc.getStats();
+    let pair = null;
+    let local = new Map();
+    let remote = new Map();
+
+    report.forEach(r => {
+      if (r.type === "candidate-pair" &&
+          (r.selected || r.nominated) &&
+          r.state === "succeeded") {
+        pair = r;
+      }
+      if (r.type === "local-candidate") local.set(r.id, r);
+      if (r.type === "remote-candidate") remote.set(r.id, r);
+    });
+
+    // selected/nominatedが取れないブラウザ向けに、succeededのpairも探す。
+    if (!pair) {
+      report.forEach(r => {
+        if (r.type === "candidate-pair" && r.state === "succeeded") {
+          pair = r;
+        }
+      });
+    }
+
+    if (!pair) {
+      $("stats").textContent =
+        `ICE state: ${pc.iceConnectionState}\n接続候補ペアをまだ確認できません。`;
+      return;
+    }
+
+    const lc = local.get(pair.localCandidateId);
+    const rc = remote.get(pair.remoteCandidateId);
+
+    $("stats").textContent =
+      `ICE state: ${pc.iceConnectionState}\n` +
+      `candidate pair: succeeded\n` +
+      `local: ${lc?.candidateType || "unknown"} ${lc?.address || ""}:${lc?.port || ""}\n` +
+      `remote: ${rc?.candidateType || "unknown"} ${rc?.address || ""}:${rc?.port || ""}\n` +
+      `protocol: ${pair.protocol || "unknown"}\n` +
+      `RTT: ${pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + " ms" : "unknown"}`;
+  } catch (e) {
+    console.warn("stats取得失敗:", e);
+  }
+}
+
+$("sender").onclick = startSender;
+$("receiver").onclick = startReceiver;
+
+$("camera").onclick = async () => {
+  if (role !== "sender") {
+    await startSender();
+  }
+};
+
+$("apply").onclick = applyRemote;
+
+$("copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($("local").value);
+    status("コピーしました。");
+  } catch {
+    $("local").select();
+    document.execCommand("copy");
+    status("コピーしました。");
+  }
+};
+
+// 接続後も診断情報を定期更新する。
+setInterval(updateStats, 2000);
+</script>
+</body>
+</html>
