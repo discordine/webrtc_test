@@ -22,8 +22,9 @@
 
   <div class="box">
     <h2>1. 役割</h2>
-    <button id="sender">PC側（送信）</button>
-    <button id="receiver">スマホ側（受信）</button>
+    <span id="current_role"></span>
+    <button id="sender">送信</button>
+    <button id="receiver">受信</button>
   </div>
 
   <div class="box">
@@ -34,7 +35,7 @@
 
   <div class="box">
     <h2>3. シグナリング</h2>
-    <p class="small">Offer / Answerは手動でコピーします。映像そのものはこのページを経由しません。</p>
+    <p class="small">Offer / Answerを手動でコピーしてください。</p>
 
     <label>自分が生成した情報</label>
     <textarea id="local" readonly></textarea>
@@ -71,7 +72,6 @@
 
 // Googleの公開STUNサーバー。
 // STUNはNAT越しの外側アドレス候補を発見するために使用する。
-// STUN自体は映像を中継しない。
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" }
 ];
@@ -155,7 +155,6 @@ async function startSender() {
   createPeer();
 
   try {
-    // getUserMediaもブラウザ標準API。
     stream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: false
@@ -281,8 +280,21 @@ async function updateStats() {
   }
 }
 
-$("sender").onclick = startSender;
-$("receiver").onclick = startReceiver;
+$("sender").onclick = async () => {
+  $("sender").remove();
+  $("receiver").remove();
+  $("current_role").textContent = "あなたは送信側です。"
+
+  await startSender();
+};
+
+$("receiver").onclick = () => {
+  $("sender").remove();
+  $("receiver").remove();
+  $("current_role").textContent = "あなたは受信側です。"
+
+  startReceiver();
+};
 
 $("camera").onclick = async () => {
   if (role !== "sender") {
